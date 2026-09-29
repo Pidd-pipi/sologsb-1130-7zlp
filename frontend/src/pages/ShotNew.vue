@@ -11,7 +11,7 @@ import { useLocalDraft } from '../hooks/useLocalDraft';
 import { buildFrameRange, framesToDuration } from '../utils/frameMath';
 import { addFrames } from '../db/api';
 import { FPS_OPTIONS, SHOT_STATUS_OPTIONS, type ShotStatus } from '../types/shot';
-import { createEmptyFrame, type FrameEntry } from '../types/frame';
+import { applyFramePatch, createEmptyFrame, type FrameEntry } from '../types/frame';
 import ExposureForm from '../components/common/ExposureForm.vue';
 import StatusTag from '../components/common/StatusTag.vue';
 import EmptyState from '../components/common/EmptyState.vue';
@@ -92,7 +92,11 @@ async function submit() {
       status: draft.value.status,
       owner: draft.value.owner.trim(),
     });
-    const first: FrameEntry = { ...createEmptyFrame(shot.id as number, shot.startFrame), ...exposure.value, id: undefined };
+    // 首位帧默认只有一遍，曝光表单里的灯光/曝光时间/张数/备注写入该遍并回算合计
+    const first: FrameEntry = applyFramePatch(
+      { ...createEmptyFrame(shot.id as number, shot.startFrame), id: undefined },
+      exposure.value,
+    );
     await addFrames([first]);
     await frameStore.loadForShot(shot.id as number);
     reset();

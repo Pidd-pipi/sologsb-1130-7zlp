@@ -7,7 +7,8 @@ import { storeToRefs } from 'pinia';
 import { useFrameStore } from '../stores/frameStore';
 import { useShotStore } from '../stores/shotStore';
 import { durationToFrames, framesToDuration } from '../utils/frameMath';
-import type { FrameEntry } from '../types/frame';
+import type { ExposurePass, FrameEntry } from '../types/frame';
+import { passesTotal } from '../types/frame';
 
 export function useFrameSequence() {
   const frameStore = useFrameStore();
@@ -20,6 +21,8 @@ export function useFrameSequence() {
   const frameCount = computed(() => frames.value.length);
   const totalDuration = computed(() => framesToDuration(frameCount.value, fps.value));
   const plannedFrames = computed(() => durationToFrames(shot.value?.durationSec ?? 0, fps.value));
+  /** 当前帧序的拍摄合计张数（各帧各遍次张数之和） */
+  const totalShotCount = computed(() => frames.value.reduce((sum, f) => sum + passesTotal(f.passes), 0));
 
   async function insertAfter(frameNo: number | null) {
     const index = frameNo === null ? frames.value.length : frames.value.findIndex((f) => f.frameNo === frameNo) + 1;
@@ -63,6 +66,26 @@ export function useFrameSequence() {
     await frameStore.patchFrame(frameNo, patchValue);
   }
 
+  /** 给某一帧增加一遍（默认复制末遍灯光/曝光，备注留空） */
+  async function addPass(frameNo: number) {
+    await frameStore.addPass(frameNo);
+  }
+
+  /** 删除某帧的一遍；只剩一遍时保留该遍原参数 */
+  async function removePass(frameNo: number, passKey: string) {
+    await frameStore.removePass(frameNo, passKey);
+  }
+
+  /** 改某一遍的灯光/曝光/张数/备注，帧合计与条带合计立即重算 */
+  async function patchPass(frameNo: number, passKey: string, patchValue: Partial<ExposurePass>) {
+    await frameStore.patchPass(frameNo, passKey, patchValue);
+  }
+
+  /** 某帧内遍次上下换序 */
+  async function movePass(frameNo: number, passKey: string, dir: -1 | 1) {
+    await frameStore.movePass(frameNo, passKey, dir);
+  }
+
   function select(frameNo: number | null) {
     frameStore.select(frameNo);
   }
@@ -75,10 +98,15 @@ export function useFrameSequence() {
     frameCount,
     totalDuration,
     plannedFrames,
+    totalShotCount,
     insertAfter,
     removeAt,
     move,
     patch,
+    addPass,
+    removePass,
+    patchPass,
+    movePass,
     select,
     syncShotRange,
     reload: (id: number) => frameStore.loadForShot(id),

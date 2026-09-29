@@ -42,7 +42,7 @@ sologsb-1130/
     └── src/
         ├── types/{shot,frame,prop,take}.ts        # 4 个数据模型
         ├── stores/{shotStore,frameStore,uiStore}.ts
-        ├── components/common/{FrameStrip,ExposureForm,ShotProgress,StatusTag,EmptyState}.vue
+        ├── components/common/{FrameStrip,ExposureForm,PassEditor,ShotProgress,StatusTag,EmptyState}.vue
         ├── hooks/{useFrameSequence,useProgress,useLocalDraft}.ts
         ├── pages/{Overview,ShotNew,ShotDetail,FrameBoard,PropTrack,TakeLog}.vue
         ├── router/index.ts
@@ -64,6 +64,7 @@ sologsb-1130/
 ## 数据存储
 
 - **IndexedDB（Dexie，`gbstopmotion-db`）**：镜头、帧条目、道具状态、实拍记录四张表。
-  版本迁移：`v1` 建 `shots` / `frames`；`v2` 增加 `props` 表与 `shotId` 索引；`v3` 增加 `takes` 表并按实拍张数回填进度。
+  版本迁移：`v1` 建 `shots` / `frames`；`v2` 增加 `props` 表与 `shotId` 索引；`v3` 增加 `takes` 表并按实拍张数回填进度；`v4` 帧条目升级为「拍摄遍次」结构（`frames.passes`），旧帧的单套灯光/曝光/张数/备注自动迁移成唯一一遍，并回写帧级合计张数。
+  每帧可分多遍拍摄（先拍背景、换灯后拍前景），遍次记录灯光、曝光时间、拍摄张数与备注，支持增删与上下换序；帧合计张数 = 各遍张数之和，光圈 / ISO / 快门角 / 道具位移仍为帧级参数。
 - **localStorage**：新建镜头表单与批量曝光参数草稿，键前缀 `gbstopmotion:draft:`。
 - 全部数据存在浏览器本地，容器无状态、不使用数据库服务、不挂载命名卷，无任何后端接口调用。

@@ -16,7 +16,8 @@ import { durationToFrames, estimateSpeed, framesToDuration } from '../utils/fram
 import { FIXATION_OPTIONS, type Fixation, type PropState } from '../types/prop';
 import { SHOT_STATUS_OPTIONS, type ShotStatus } from '../types/shot';
 import type { FrameEntry } from '../types/frame';
-import { SHOT_COUNT_OPTIONS } from '../types/frame';
+import { passesTotal } from '../types/frame';
+import type { ExposurePass } from '../types/frame';
 import { today } from '../utils/format';
 import FrameStrip from '../components/common/FrameStrip.vue';
 import ExposureForm from '../components/common/ExposureForm.vue';
@@ -30,7 +31,8 @@ const shotStore = useShotStore();
 const frameStore = useFrameStore();
 const { frames, selectedFrameNo } = storeToRefs(frameStore);
 
-const { insertAfter, removeAt, move, patch, select, syncShotRange } = useFrameSequence();
+const { insertAfter, removeAt, move, patch, select, syncShotRange, addPass, removePass, patchPass, movePass, totalShotCount } =
+  useFrameSequence();
 const { registerTake, summaries, loadTakes, computeProgress } = useProgress();
 
 const props = ref<PropState[]>([]);
@@ -49,7 +51,6 @@ const sceneProgress = computed(() =>
 );
 const statusOptions = SHOT_STATUS_OPTIONS;
 const fixationOptions = FIXATION_OPTIONS;
-const shotCountOptions = SHOT_COUNT_OPTIONS;
 
 async function bootstrap(id: number) {
   if (!shotStore.ready) await shotStore.load();
@@ -66,14 +67,14 @@ async function bootstrap(id: number) {
   const first = frames.value[0];
   exposureDraft.value = first
     ? {
-        shotCount: first.shotCount,
-        exposureSec: first.exposureSec,
+        shotCount: first.passes[0]?.shotCount ?? first.shotCount,
+        exposureSec: first.passes[0]?.exposureSec ?? first.exposureSec,
         aperture: first.aperture,
         iso: first.iso,
         shutterAngle: first.shutterAngle,
-        lighting: first.lighting,
+        lighting: first.passes[0]?.lighting ?? first.lighting,
         propOffsetMm: first.propOffsetMm,
-        note: '',
+        note: first.passes[0]?.note ?? '',
       }
     : {};
 }
@@ -126,6 +127,29 @@ async function reorder(from: number, to: number) {
 
 async function patchFrame(frameNo: number, value: Partial<FrameEntry>) {
   await patch(frameNo, value);
+}
+
+async function onAddPass(frameNo: number) {
+  await addPass(frameNo);
+  flash('已增加一遍拍摄参数');
+}
+
+async function onRemovePass(frameNo: number, passKey: string) {
+  await removePass(frameNo, passKey);
+  flash('已删除该遍，合计张数已重算');
+}
+
+async function onPatchPass(frameNo: number, passKey: string, value: Partial<ExposurePass>) {
+  await patchPass(frameNo, passKey, value);
+}
+
+async function onMovePass(frameNo: number, passKey: string, dir: -1 | 1) {
+  await movePass(frameNo, passKey, dir);
+}
+
+/** 帧合计张数：各遍张数之和 */
+function shotsOf(frame: FrameEntry): number {
+  return passesTotal(frame.passes);
 }
 
 async function editCell(frame: FrameEntry, key: keyof FrameEntry, raw: string, numeric = true) {
@@ -291,6 +315,10 @@ function speedOf(frame: FrameEntry) {
           @update:selected="select"
           @reorder="reorder"
           @patch="patchFrame"
+          @add-pass="onAddPass"
+          @remove-pass="onRemovePass"
+          @move-pass="onMovePass"
+          @patch-pass="onPatchPass"
         />
         <div v-if="selectedFrameNo !== null" class="prop-lookup" data-testid="prop-lookup">
           <strong>第 {{ selectedFrameNo }} 帧道具位置：</strong>
@@ -314,12 +342,13 @@ function speedOf(frame: FrameEntry) {
           <thead>
             <tr>
               <th>帧号</th>
-              <th>张数</th>
-              <th>曝光 s</th>
+              <th>合计张数</th>
+              <th>遍次</th>
+              <th>首遍曝光 s</th>
               <th>光圈</th>
               <th>ISO</th>
               <th>快门角</th>
-              <th>灯光</th>
+              <th>首遍灯光</th>
               <th>位移 mm</th>
               <th>位移速度</th>
               <th>操作</th>
@@ -328,11 +357,10 @@ function speedOf(frame: FrameEntry) {
           <tbody>
             <tr v-for="frame in frames" :key="frame.id ?? frame.frameNo" :class="{ active: frame.frameNo === selectedFrameNo }" @click="select(frame.frameNo)">
               <td class="mono">{{ frame.frameNo }}</td>
-              <td>
-                <select :value="frame.shotCount" @change="editCell(frame, 'shotCount', ($event.target as HTMLSelectElement).value)">
-                  <option v-for="c in shotCountOptions" :key="c" :value="c">{{ c }}</option>
-                </select>
+              <td data-testid="row-total-shots">
+                <strong>{{ shotsOf(frame) }}</strong> 张
               </td>
+              <td><span class="pass-badge">{{ frame.passes.length }} 遍</span></td>
               <td><input type="number" min="0.008" max="8" step="0.008" :value="frame.exposureSec" @change="editCell(frame, 'exposureSec', ($event.target as HTMLInputElement).value)" /></td>
               <td><input type="number" min="1.4" max="22" step="0.1" :value="frame.aperture" @change="editCell(frame, 'aperture', ($event.target as HTMLInputElement).value)" /></td>
               <td><input type="number" min="100" max="3200" step="100" :value="frame.iso" @change="editCell(frame, 'iso', ($event.target as HTMLInputElement).value)" /></td>
@@ -346,6 +374,15 @@ function speedOf(frame: FrameEntry) {
               </td>
             </tr>
           </tbody>
+          <tfoot>
+            <tr class="table-sum">
+              <td>合计</td>
+              <td :colspan="10">
+                {{ frames.length }} 帧 · 拍摄合计 <strong data-testid="table-total-shots">{{ totalShotCount }}</strong> 张
+                <span class="muted">（遍次张数改动后立即重算；选中帧可在上方条带里增删遍次）</span>
+              </td>
+            </tr>
+          </tfoot>
         </table>
         <EmptyState v-else title="该镜头还没有帧条目" description="点击「插入帧」按当前曝光参数生成第一帧。" action-text="插入帧" @action="addFrameWithExposure" />
       </div>
@@ -536,6 +573,22 @@ h1 .mono {
 }
 .table tbody tr.active {
   background: #f5f8ff;
+}
+.table tfoot .table-sum td {
+  border-top: 2px solid #dfe5ee;
+  border-bottom: none;
+  padding-top: 10px;
+  font-size: 13px;
+}
+.pass-badge {
+  display: inline-block;
+  background: #f0f4ff;
+  border: 1px solid #dbe6ff;
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-size: 12px;
+  color: #3358b8;
+  white-space: nowrap;
 }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

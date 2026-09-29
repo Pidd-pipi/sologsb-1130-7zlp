@@ -4,11 +4,13 @@
  *   v1 建 shots / frames
  *   v2 增加 props 表与 shotId 索引
  *   v3 增加 takes 表，并按实拍张数回填进度
+ *   v4 帧条目改为「拍摄遍次」结构，旧帧的单套曝光参数迁移成一遍
  */
 import Dexie from 'dexie';
 import type { Table } from 'dexie';
 import type { Shot } from '../types/shot';
 import type { FrameEntry } from '../types/frame';
+import { normalizeFrame, passFromFrame, passesTotal } from '../types/frame';
 import type { PropState } from '../types/prop';
 import type { TakeLog } from '../types/take';
 
@@ -72,6 +74,35 @@ export class StopMotionDb extends Dexie {
           const percent = Math.min(100, Math.round((take.takenFrames / total) * 100));
           await tx.table('takes').update(take.id, { percent });
         }
+      });
+    this.version(4)
+      .stores({
+        shots: '++id, code, status, sceneName',
+        frames: '++id, shotId, frameNo, [shotId+frameNo]',
+        props: '++id, shotId, name, [shotId+fromFrame]',
+        takes: '++id, shotId, date, shotCode',
+      })
+      .upgrade(async (tx) => {
+        // v4：旧帧只有一套曝光参数，迁移成唯一一遍并把合计张数回写到帧级快照
+        await tx
+          .table('frames')
+          .toCollection()
+          .modify((row: Record<string, unknown>) => {
+            const hasPasses = Array.isArray(row.passes) && row.passes.length > 0;
+            if (!hasPasses) {
+              const pass = passFromFrame(row);
+              row.passes = [pass];
+              row.shotCount = passesTotal([pass]);
+              return;
+            }
+            // 即便已带遍次也校正一次合计，保证从中间版本进入时数据一致
+            const normalized = normalizeFrame(row as unknown as FrameEntry);
+            row.shotCount = normalized.shotCount;
+            row.exposureSec = normalized.exposureSec;
+            row.lighting = normalized.lighting;
+            row.note = normalized.note;
+            row.passes = normalized.passes;
+          });
       });
   }
 }

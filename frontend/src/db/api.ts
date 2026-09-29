@@ -2,6 +2,7 @@
 import { db, toPlain } from './index';
 import type { Shot } from '../types/shot';
 import type { FrameEntry } from '../types/frame';
+import { normalizeFrame } from '../types/frame';
 import type { PropState } from '../types/prop';
 import type { TakeLog } from '../types/take';
 
@@ -41,20 +42,21 @@ export async function deleteShot(id: number): Promise<void> {
 
 export async function listFrames(shotId: number): Promise<FrameEntry[]> {
   const rows = await db.frames.where('shotId').equals(shotId).toArray();
-  return rows.sort((a, b) => a.frameNo - b.frameNo);
+  return rows.map(normalizeFrame).sort((a, b) => a.frameNo - b.frameNo);
 }
 
 export async function listAllFrames(): Promise<FrameEntry[]> {
-  return db.frames.toArray();
+  const rows = await db.frames.toArray();
+  return rows.map(normalizeFrame);
 }
 
 export async function addFrame(frame: FrameEntry): Promise<number> {
-  return db.frames.add(toPlain(frame));
+  return db.frames.add(toPlain(normalizeFrame(frame)));
 }
 
 export async function addFrames(frames: FrameEntry[]): Promise<void> {
   if (!frames.length) return;
-  await db.frames.bulkAdd(frames.map((f) => toPlain(f)));
+  await db.frames.bulkAdd(frames.map((f) => toPlain(normalizeFrame(f))));
 }
 
 export async function updateFrame(id: number, patch: Partial<FrameEntry>): Promise<void> {
@@ -65,7 +67,9 @@ export async function updateFrames(rows: FrameEntry[]): Promise<void> {
   await db.transaction('rw', db.frames, async () => {
     for (const row of rows) {
       if (typeof row.id !== 'number') continue;
-      const { id, ...rest } = row;
+      const id = row.id;
+      const rest = normalizeFrame(row);
+      delete rest.id;
       await db.frames.update(id, toPlain({ ...rest, updatedAt: Date.now() }));
     }
   });
@@ -76,7 +80,7 @@ export async function deleteFrame(id: number): Promise<void> {
 }
 
 export async function replaceShotFrames(shotId: number, frames: FrameEntry[]): Promise<void> {
-  const plain = frames.map((f) => toPlain(f));
+  const plain = frames.map((f) => toPlain(normalizeFrame(f)));
   await db.transaction('rw', db.frames, async () => {
     await db.frames.where('shotId').equals(shotId).delete();
     if (plain.length) await db.frames.bulkAdd(plain);

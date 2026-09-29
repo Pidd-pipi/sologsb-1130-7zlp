@@ -11,7 +11,8 @@ import { useFrameSequence } from '../hooks/useFrameSequence';
 import { useLocalDraft } from '../hooks/useLocalDraft';
 import { durationToFrames, framesToDuration } from '../utils/frameMath';
 import { APERTURE_OPTIONS, EXPOSURE_OPTIONS, ISO_OPTIONS, SHUTTER_ANGLE_OPTIONS } from '../utils/exposure';
-import type { BatchExposure, FrameEntry } from '../types/frame';
+import type { BatchExposure, ExposurePass, FrameEntry } from '../types/frame';
+import { passesTotal } from '../types/frame';
 import type { Shot } from '../types/shot';
 import FrameStrip from '../components/common/FrameStrip.vue';
 import ExposureForm from '../components/common/ExposureForm.vue';
@@ -22,7 +23,21 @@ const shotStore = useShotStore();
 const frameStore = useFrameStore();
 const { shots } = storeToRefs(shotStore);
 const { frames, selectedFrameNo } = storeToRefs(frameStore);
-const { insertAfter, removeAt, move, patch, select, syncShotRange, totalDuration, fps } = useFrameSequence();
+const {
+  insertAfter,
+  removeAt,
+  move,
+  patch,
+  select,
+  syncShotRange,
+  totalDuration,
+  fps,
+  totalShotCount,
+  addPass,
+  removePass,
+  patchPass,
+  movePass,
+} = useFrameSequence();
 
 const activeShotId = ref<number | null>(null);
 const feedback = ref('');
@@ -117,6 +132,29 @@ async function patchFrame(frameNo: number, value: Partial<FrameEntry>) {
   await patch(frameNo, value);
 }
 
+async function onAddPass(frameNo: number) {
+  await addPass(frameNo);
+  flash('已增加一遍拍摄参数');
+}
+
+async function onRemovePass(frameNo: number, passKey: string) {
+  await removePass(frameNo, passKey);
+  flash('已删除该遍，合计张数已重算');
+}
+
+async function onPatchPass(frameNo: number, passKey: string, value: Partial<ExposurePass>) {
+  await patchPass(frameNo, passKey, value);
+}
+
+async function onMovePass(frameNo: number, passKey: string, dir: -1 | 1) {
+  await movePass(frameNo, passKey, dir);
+}
+
+/** 帧合计张数：各遍张数之和 */
+function shotsOf(frame: FrameEntry): number {
+  return passesTotal(frame.passes);
+}
+
 function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
   const index = ordered.value.findIndex((f) => f.frameNo === frame.frameNo);
   const target = index + dir;
@@ -153,7 +191,8 @@ function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
       <div class="stat-row">
         <div class="stat"><span class="label">镜号</span><span class="value small mono">{{ activeShot.code }}</span></div>
         <div class="stat"><span class="label">条带帧数</span><span class="value">{{ frames.length }}</span></div>
-        <div class="stat"><span class="label">计划张数</span><span class="value">{{ planned }}</span></div>
+        <div class="stat"><span class="label">拍摄合计张数</span><span class="value" data-testid="board-total-shots">{{ totalShotCount }}</span></div>
+        <div class="stat"><span class="label">计划帧数</span><span class="value">{{ planned }}</span></div>
         <div class="stat"><span class="label">当前时长</span><span class="value small">{{ totalDuration }} s</span></div>
         <div class="stat"><span class="label">帧率</span><span class="value small">{{ fps }} fps</span></div>
       </div>
@@ -167,7 +206,17 @@ function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
             <button type="button" class="btn small" @click="syncShotRange">重算时长</button>
           </div>
         </div>
-        <FrameStrip :frames="ordered" :selected="selectedFrameNo" @update:selected="select" @reorder="doReorder" @patch="patchFrame" />
+        <FrameStrip
+          :frames="ordered"
+          :selected="selectedFrameNo"
+          @update:selected="select"
+          @reorder="doReorder"
+          @patch="patchFrame"
+          @add-pass="onAddPass"
+          @remove-pass="onRemovePass"
+          @move-pass="onMovePass"
+          @patch-pass="onPatchPass"
+        />
       </div>
 
       <div class="two-panel">
@@ -213,16 +262,17 @@ function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
       </div>
 
       <div class="panel">
-        <div class="panel-head"><h2>帧序明细</h2><span class="muted">可上下移动单帧，序号自动重排</span></div>
+        <div class="panel-head"><h2>帧序明细</h2><span class="muted">可上下移动单帧，序号自动重排；遍次在选中帧的条带编辑器里增删换序</span></div>
         <table class="table" data-testid="board-table">
           <thead>
-            <tr><th>位次</th><th>帧号</th><th>张数</th><th>曝光 s</th><th>光圈</th><th>ISO</th><th>位移 mm</th><th>操作</th></tr>
+            <tr><th>位次</th><th>帧号</th><th>合计张数</th><th>遍次</th><th>曝光 s</th><th>光圈</th><th>ISO</th><th>位移 mm</th><th>操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="(frame, index) in ordered" :key="frame.id ?? index" :class="{ active: frame.frameNo === selectedFrameNo }" @click="select(frame.frameNo)">
               <td>{{ index + 1 }}</td>
               <td class="mono">{{ frame.frameNo }}</td>
-              <td>{{ frame.shotCount }} 张</td>
+              <td data-testid="board-row-shots"><strong>{{ shotsOf(frame) }}</strong> 张</td>
+              <td><span class="pass-badge">{{ frame.passes.length }} 遍</span></td>
               <td>{{ frame.exposureSec }}</td>
               <td>f/{{ frame.aperture }}</td>
               <td>{{ frame.iso }}</td>
@@ -233,6 +283,12 @@ function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
               </td>
             </tr>
           </tbody>
+          <tfoot>
+            <tr class="table-sum">
+              <td colspan="3">拍摄合计 <strong data-testid="board-table-total">{{ totalShotCount }}</strong> 张</td>
+              <td colspan="6" class="muted">遍次张数改动后立即重算</td>
+            </tr>
+          </tfoot>
         </table>
         <p class="muted">按帧率 {{ fps }} fps 计算，当前帧序等效时长 {{ framesToDuration(ordered.length, fps) }} s。</p>
       </div>
@@ -369,6 +425,22 @@ h1 {
 }
 .table tbody tr.active {
   background: #f5f8ff;
+}
+.table tfoot .table-sum td {
+  border-top: 2px solid #dfe5ee;
+  border-bottom: none;
+  padding-top: 10px;
+  font-size: 13px;
+}
+.pass-badge {
+  display: inline-block;
+  background: #f0f4ff;
+  border: 1px solid #dbe6ff;
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-size: 12px;
+  color: #3358b8;
+  white-space: nowrap;
 }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
