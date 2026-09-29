@@ -2,6 +2,7 @@
 import { db, toPlain } from './index';
 import type { Shot } from '../types/shot';
 import type { FrameEntry } from '../types/frame';
+import { normalizeFrame } from '../types/frame';
 import type { PropState } from '../types/prop';
 import type { TakeLog } from '../types/take';
 
@@ -39,34 +40,44 @@ export async function deleteShot(id: number): Promise<void> {
 
 /* ---------------- frames ---------------- */
 
+/** 落库前去掉 v3 遗留的单套曝光标量字段，遍次数组是唯一事实来源 */
+const LEGACY_FRAME_KEYS = ['shotCount', 'exposureSec', 'aperture', 'iso', 'shutterAngle', 'lighting', 'note'] as const;
+
+function serializeFrame<T extends Partial<FrameEntry>>(frame: T): T {
+  const rest = { ...frame };
+  for (const key of LEGACY_FRAME_KEYS) delete (rest as Record<string, unknown>)[key];
+  return toPlain(rest);
+}
+
 export async function listFrames(shotId: number): Promise<FrameEntry[]> {
   const rows = await db.frames.where('shotId').equals(shotId).toArray();
-  return rows.sort((a, b) => a.frameNo - b.frameNo);
+  return rows.map(normalizeFrame).sort((a, b) => a.frameNo - b.frameNo);
 }
 
 export async function listAllFrames(): Promise<FrameEntry[]> {
-  return db.frames.toArray();
+  const rows = await db.frames.toArray();
+  return rows.map(normalizeFrame);
 }
 
 export async function addFrame(frame: FrameEntry): Promise<number> {
-  return db.frames.add(toPlain(frame));
+  return db.frames.add(serializeFrame(frame));
 }
 
 export async function addFrames(frames: FrameEntry[]): Promise<void> {
   if (!frames.length) return;
-  await db.frames.bulkAdd(frames.map((f) => toPlain(f)));
+  await db.frames.bulkAdd(frames.map((f) => serializeFrame(f)));
 }
 
 export async function updateFrame(id: number, patch: Partial<FrameEntry>): Promise<void> {
-  await db.frames.update(id, toPlain({ ...patch, updatedAt: Date.now() }));
+  await db.frames.update(id, serializeFrame({ ...patch, updatedAt: Date.now() }));
 }
 
 export async function updateFrames(rows: FrameEntry[]): Promise<void> {
   await db.transaction('rw', db.frames, async () => {
     for (const row of rows) {
       if (typeof row.id !== 'number') continue;
-      const { id, ...rest } = row;
-      await db.frames.update(id, toPlain({ ...rest, updatedAt: Date.now() }));
+      const { id, ...fields } = serializeFrame(row);
+      await db.frames.update(id as number, { ...fields, updatedAt: Date.now() });
     }
   });
 }
@@ -76,7 +87,7 @@ export async function deleteFrame(id: number): Promise<void> {
 }
 
 export async function replaceShotFrames(shotId: number, frames: FrameEntry[]): Promise<void> {
-  const plain = frames.map((f) => toPlain(f));
+  const plain = frames.map((f) => serializeFrame(f));
   await db.transaction('rw', db.frames, async () => {
     await db.frames.where('shotId').equals(shotId).delete();
     if (plain.length) await db.frames.bulkAdd(plain);

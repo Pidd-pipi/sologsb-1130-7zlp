@@ -11,7 +11,7 @@ import { useLocalDraft } from '../hooks/useLocalDraft';
 import { buildFrameRange, framesToDuration } from '../utils/frameMath';
 import { addFrames } from '../db/api';
 import { FPS_OPTIONS, SHOT_STATUS_OPTIONS, type ShotStatus } from '../types/shot';
-import { createEmptyFrame, type FrameEntry } from '../types/frame';
+import { createFrameFromDraft, type PassDraft } from '../types/frame';
 import ExposureForm from '../components/common/ExposureForm.vue';
 import StatusTag from '../components/common/StatusTag.vue';
 import EmptyState from '../components/common/EmptyState.vue';
@@ -30,14 +30,13 @@ const { draft, savedAt, reset } = useLocalDraft('shot-new', {
   owner: '',
 });
 
-const exposure = ref<Partial<FrameEntry>>({
+const exposure = ref<Partial<PassDraft>>({
   shotCount: 2,
   exposureSec: 0.25,
   aperture: 5.6,
   iso: 200,
   shutterAngle: 180,
   lighting: '主灯 + 柔光箱',
-  propOffsetMm: 0,
   note: '',
 });
 
@@ -92,7 +91,7 @@ async function submit() {
       status: draft.value.status,
       owner: draft.value.owner.trim(),
     });
-    const first: FrameEntry = { ...createEmptyFrame(shot.id as number, shot.startFrame), ...exposure.value, id: undefined };
+    const first = createFrameFromDraft(shot.id as number, shot.startFrame, exposure.value);
     await addFrames([first]);
     await frameStore.loadForShot(shot.id as number);
     reset();

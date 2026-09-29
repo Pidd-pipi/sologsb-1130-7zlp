@@ -21,9 +21,9 @@ export function useFrameSequence() {
   const totalDuration = computed(() => framesToDuration(frameCount.value, fps.value));
   const plannedFrames = computed(() => durationToFrames(shot.value?.durationSec ?? 0, fps.value));
 
-  async function insertAfter(frameNo: number | null) {
+  async function insertAfter(frameNo: number | null, seed?: Partial<FrameEntry>) {
     const index = frameNo === null ? frames.value.length : frames.value.findIndex((f) => f.frameNo === frameNo) + 1;
-    await frameStore.insertAt(Math.max(0, index));
+    await frameStore.insertAt(Math.max(0, index), seed);
     await syncShotRange();
   }
 

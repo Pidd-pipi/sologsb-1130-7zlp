@@ -15,11 +15,12 @@ import * as api from '../db/api';
 import { durationToFrames, estimateSpeed, framesToDuration } from '../utils/frameMath';
 import { FIXATION_OPTIONS, type Fixation, type PropState } from '../types/prop';
 import { SHOT_STATUS_OPTIONS, type ShotStatus } from '../types/shot';
-import type { FrameEntry } from '../types/frame';
-import { SHOT_COUNT_OPTIONS } from '../types/frame';
+import type { ExposurePass, FrameEntry, PassDraft } from '../types/frame';
+import { totalShotCount } from '../types/frame';
 import { today } from '../utils/format';
 import FrameStrip from '../components/common/FrameStrip.vue';
 import ExposureForm from '../components/common/ExposureForm.vue';
+import PassList from '../components/common/PassList.vue';
 import ShotProgress from '../components/common/ShotProgress.vue';
 import StatusTag from '../components/common/StatusTag.vue';
 import EmptyState from '../components/common/EmptyState.vue';
@@ -36,7 +37,7 @@ const { registerTake, summaries, loadTakes, computeProgress } = useProgress();
 const props = ref<PropState[]>([]);
 const takeForm = ref({ date: today(), takenFrames: 8, wastedFrames: 0 });
 const propForm = ref({ name: '', fromFrame: 1, toFrame: 12, posX: 0, posY: 0, posZ: 0, rotation: 0, fixation: '支架' as Fixation });
-const exposureDraft = ref<Partial<FrameEntry>>({});
+const exposureDraft = ref<Partial<PassDraft>>({});
 const feedback = ref('');
 const notFound = ref(false);
 
@@ -49,7 +50,10 @@ const sceneProgress = computed(() =>
 );
 const statusOptions = SHOT_STATUS_OPTIONS;
 const fixationOptions = FIXATION_OPTIONS;
-const shotCountOptions = SHOT_COUNT_OPTIONS;
+
+/** 明细合计张数：各帧各遍张数之和，遍次张数调整后随响应式立即重算 */
+const detailTotalShots = computed(() => frames.value.reduce((sum, f) => sum + totalShotCount(f.passes), 0));
+const selectedFrame = computed(() => frames.value.find((f) => f.frameNo === selectedFrameNo.value) ?? null);
 
 async function bootstrap(id: number) {
   if (!shotStore.ready) await shotStore.load();
@@ -64,15 +68,14 @@ async function bootstrap(id: number) {
   props.value = await api.listProps(id);
   if (typeof row.id === 'number') shotStore.currentId = row.id;
   const first = frames.value[0];
-  exposureDraft.value = first
+  exposureDraft.value = first && first.passes.length
     ? {
-        shotCount: first.shotCount,
-        exposureSec: first.exposureSec,
-        aperture: first.aperture,
-        iso: first.iso,
-        shutterAngle: first.shutterAngle,
-        lighting: first.lighting,
-        propOffsetMm: first.propOffsetMm,
+        shotCount: first.passes[0].shotCount,
+        exposureSec: first.passes[0].exposureSec,
+        aperture: first.passes[0].aperture,
+        iso: first.passes[0].iso,
+        shutterAngle: first.passes[0].shutterAngle,
+        lighting: first.passes[0].lighting,
         note: '',
       }
     : {};
@@ -110,12 +113,11 @@ async function changeFps(value: number) {
 }
 
 async function addFrameWithExposure() {
-  await insertAfter(selectedFrameNo.value ?? frames.value[frames.value.length - 1]?.frameNo ?? null);
+  const anchor = selectedFrameNo.value ?? frames.value[frames.value.length - 1]?.frameNo ?? null;
+  // 草稿是单遍参数（灯光 / 曝光 / 张数等标量），store 会据此生成第一遍
+  await insertAfter(anchor, exposureDraft.value as Partial<FrameEntry>);
   const last = frames.value[frames.value.length - 1];
-  if (last) {
-    await patch(last.frameNo, exposureDraft.value as Partial<FrameEntry>);
-    select(last.frameNo);
-  }
+  if (last) select(last.frameNo);
   flash('已在帧序中插入一帧');
 }
 
@@ -128,9 +130,40 @@ async function patchFrame(frameNo: number, value: Partial<FrameEntry>) {
   await patch(frameNo, value);
 }
 
-async function editCell(frame: FrameEntry, key: keyof FrameEntry, raw: string, numeric = true) {
-  const value = numeric ? Number(raw) : raw;
-  await patch(frame.frameNo, { [key]: value } as Partial<FrameEntry>);
+async function editOffset(frame: FrameEntry, raw: string) {
+  await patch(frame.frameNo, { propOffsetMm: Number(raw) });
+}
+
+/* ---------------- 拍摄遍次操作（增删 / 改 / 上下换序） ---------------- */
+
+async function onPassUpdate(frameNo: number, uid: string, value: Partial<ExposurePass>) {
+  await frameStore.updatePass(frameNo, uid, value);
+}
+
+async function onPassAdd(frameNo: number) {
+  await frameStore.addPass(frameNo);
+}
+
+async function onPassRemove(frameNo: number, uid: string) {
+  await frameStore.removePass(frameNo, uid);
+}
+
+async function onPassMove(frameNo: number, from: number, to: number) {
+  await frameStore.movePass(frameNo, from, to);
+}
+
+/** 明细页选中帧的遍次事件（模板里统一带上 frameNo） */
+async function updateSelectedPass(uid: string, value: Partial<ExposurePass>) {
+  if (selectedFrame.value) await onPassUpdate(selectedFrame.value.frameNo, uid, value);
+}
+function addSelectedPass() {
+  if (selectedFrame.value) void onPassAdd(selectedFrame.value.frameNo);
+}
+async function removeSelectedPass(uid: string) {
+  if (selectedFrame.value) await onPassRemove(selectedFrame.value.frameNo, uid);
+}
+async function moveSelectedPass(from: number, to: number) {
+  if (selectedFrame.value) await onPassMove(selectedFrame.value.frameNo, from, to);
 }
 
 async function removeFrameRow(frameNo: number) {
@@ -291,6 +324,10 @@ function speedOf(frame: FrameEntry) {
           @update:selected="select"
           @reorder="reorder"
           @patch="patchFrame"
+          @pass-update="onPassUpdate"
+          @pass-add="onPassAdd"
+          @pass-remove="onPassRemove"
+          @pass-move="onPassMove"
         />
         <div v-if="selectedFrameNo !== null" class="prop-lookup" data-testid="prop-lookup">
           <strong>第 {{ selectedFrameNo }} 帧道具位置：</strong>
@@ -314,12 +351,9 @@ function speedOf(frame: FrameEntry) {
           <thead>
             <tr>
               <th>帧号</th>
-              <th>张数</th>
-              <th>曝光 s</th>
-              <th>光圈</th>
-              <th>ISO</th>
-              <th>快门角</th>
-              <th>灯光</th>
+              <th>遍次数</th>
+              <th>合计张数</th>
+              <th>各遍灯光 / 曝光 / 张数</th>
               <th>位移 mm</th>
               <th>位移速度</th>
               <th>操作</th>
@@ -328,17 +362,18 @@ function speedOf(frame: FrameEntry) {
           <tbody>
             <tr v-for="frame in frames" :key="frame.id ?? frame.frameNo" :class="{ active: frame.frameNo === selectedFrameNo }" @click="select(frame.frameNo)">
               <td class="mono">{{ frame.frameNo }}</td>
+              <td :data-testid="`row-pass-count-${frame.frameNo}`">{{ frame.passes.length }} 遍</td>
               <td>
-                <select :value="frame.shotCount" @change="editCell(frame, 'shotCount', ($event.target as HTMLSelectElement).value)">
-                  <option v-for="c in shotCountOptions" :key="c" :value="c">{{ c }}</option>
-                </select>
+                <strong :data-testid="`row-total-shots-${frame.frameNo}`">{{ totalShotCount(frame.passes) }}</strong> 张
               </td>
-              <td><input type="number" min="0.008" max="8" step="0.008" :value="frame.exposureSec" @change="editCell(frame, 'exposureSec', ($event.target as HTMLInputElement).value)" /></td>
-              <td><input type="number" min="1.4" max="22" step="0.1" :value="frame.aperture" @change="editCell(frame, 'aperture', ($event.target as HTMLInputElement).value)" /></td>
-              <td><input type="number" min="100" max="3200" step="100" :value="frame.iso" @change="editCell(frame, 'iso', ($event.target as HTMLInputElement).value)" /></td>
-              <td><input type="number" min="45" max="360" step="1" :value="frame.shutterAngle" @change="editCell(frame, 'shutterAngle', ($event.target as HTMLInputElement).value)" /></td>
-              <td><input type="text" maxlength="20" :value="frame.lighting" @change="editCell(frame, 'lighting', ($event.target as HTMLInputElement).value, false)" /></td>
-              <td><input type="number" min="-200" max="200" step="0.5" :value="frame.propOffsetMm" @change="editCell(frame, 'propOffsetMm', ($event.target as HTMLInputElement).value)" /></td>
+              <td class="pass-summary muted">
+                <span v-for="(p, i) in frame.passes" :key="p.uid" class="pass-chip">
+                  {{ i + 1 }}. {{ p.lighting }} · {{ p.exposureSec }}s · {{ p.shotCount }}张<template v-if="p.note">（{{ p.note }}）</template>
+                </span>
+              </td>
+              <td>
+                <input type="number" min="-200" max="200" step="0.5" :value="frame.propOffsetMm" @click.stop @change="editOffset(frame, ($event.target as HTMLInputElement).value)" />
+              </td>
               <td class="muted">{{ speedOf(frame) }} mm/s</td>
               <td class="row-actions">
                 <button type="button" class="btn tiny" @click.stop="insertAfter(frame.frameNo)">后插</button>
@@ -346,8 +381,30 @@ function speedOf(frame: FrameEntry) {
               </td>
             </tr>
           </tbody>
+          <tfoot>
+            <tr class="table-foot">
+              <td colspan="2">合计（{{ frames.length }} 帧）</td>
+              <td data-testid="detail-total-shots">{{ detailTotalShots }} 张</td>
+              <td colspan="4" class="muted">张数随各遍「拍摄张数」调整立即重算</td>
+            </tr>
+          </tfoot>
         </table>
         <EmptyState v-else title="该镜头还没有帧条目" description="点击「插入帧」按当前曝光参数生成第一帧。" action-text="插入帧" @action="addFrameWithExposure" />
+
+        <div v-if="selectedFrame" class="pass-editor" data-testid="detail-pass-editor">
+          <div class="pass-editor-head">
+            <h3>第 {{ selectedFrame.frameNo }} 帧拍摄遍次</h3>
+            <span class="muted">每遍记录灯光、曝光时间、拍摄张数与备注，可上下换序；至少保留一遍</span>
+          </div>
+          <PassList
+            :passes="selectedFrame.passes"
+            :frame-no="selectedFrame.frameNo"
+            @update="updateSelectedPass"
+            @add="addSelectedPass"
+            @remove="removeSelectedPass"
+            @move="moveSelectedPass"
+          />
+        </div>
       </div>
 
       <div class="two-panel">
@@ -536,6 +593,33 @@ h1 .mono {
 }
 .table tbody tr.active {
   background: #f5f8ff;
+}
+.table-foot td {
+  font-weight: 600;
+  border-top: 2px solid #e2e7ef;
+}
+.pass-summary {
+  max-width: 360px;
+}
+.pass-chip {
+  display: block;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.pass-editor {
+  margin-top: 12px;
+  border-top: 1px dashed #e2e7ef;
+  padding-top: 12px;
+}
+.pass-editor-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.pass-editor-head h3 {
+  margin: 0;
+  font-size: 14px;
 }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

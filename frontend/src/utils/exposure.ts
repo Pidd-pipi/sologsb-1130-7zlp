@@ -3,7 +3,7 @@
  * 以标准曝光基准（ISO 100 / 1s / f1.0 / 快门角度 180°）折算曝光值 EV，
  * 仅用于提示与校验，不做任何图像处理。
  */
-import type { FrameEntry } from '../types/frame';
+import type { ExposurePass } from '../types/frame';
 
 export const STANDARD_SHUTTER_ANGLE = 180;
 
@@ -48,7 +48,10 @@ export interface ExposureWarning {
 }
 
 /** 越界与风险提示：返回空数组表示参数合法 */
-export function checkExposure(frame: Pick<FrameEntry, 'exposureSec' | 'aperture' | 'iso' | 'shutterAngle'>, fps = 24): ExposureWarning[] {
+export function checkExposure(
+  frame: Pick<ExposurePass, 'exposureSec' | 'aperture' | 'iso' | 'shutterAngle'>,
+  fps = 24,
+): ExposureWarning[] {
   const warnings: ExposureWarning[] = [];
   if (!(frame.exposureSec > 0) || frame.exposureSec > 8) {
     warnings.push({ field: 'exposureSec', message: '曝光时间需在 0.008s ~ 8s 之间' });
@@ -76,8 +79,8 @@ export function checkExposure(frame: Pick<FrameEntry, 'exposureSec' | 'aperture'
 
 /** 相对于参考曝光（同镜头首个帧条目）需要补正的档数 */
 export function stopsAgainstReference(
-  frame: Pick<FrameEntry, 'exposureSec' | 'aperture' | 'iso'>,
-  reference: Pick<FrameEntry, 'exposureSec' | 'aperture' | 'iso'>,
+  frame: Pick<ExposurePass, 'exposureSec' | 'aperture' | 'iso'>,
+  reference: Pick<ExposurePass, 'exposureSec' | 'aperture' | 'iso'>,
 ): number {
   const a = exposureValue(frame.exposureSec, frame.aperture, frame.iso);
   const b = exposureValue(reference.exposureSec, reference.aperture, reference.iso);

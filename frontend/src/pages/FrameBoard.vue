@@ -11,10 +11,12 @@ import { useFrameSequence } from '../hooks/useFrameSequence';
 import { useLocalDraft } from '../hooks/useLocalDraft';
 import { durationToFrames, framesToDuration } from '../utils/frameMath';
 import { APERTURE_OPTIONS, EXPOSURE_OPTIONS, ISO_OPTIONS, SHUTTER_ANGLE_OPTIONS } from '../utils/exposure';
-import type { BatchExposure, FrameEntry } from '../types/frame';
+import type { BatchExposure, ExposurePass, FrameEntry, PassDraft } from '../types/frame';
+import { totalShotCount } from '../types/frame';
 import type { Shot } from '../types/shot';
 import FrameStrip from '../components/common/FrameStrip.vue';
 import ExposureForm from '../components/common/ExposureForm.vue';
+import PassList from '../components/common/PassList.vue';
 import EmptyState from '../components/common/EmptyState.vue';
 import StatusTag from '../components/common/StatusTag.vue';
 
@@ -26,14 +28,13 @@ const { insertAfter, removeAt, move, patch, select, syncShotRange, totalDuration
 
 const activeShotId = ref<number | null>(null);
 const feedback = ref('');
-const newFrame = ref<Partial<FrameEntry>>({
+const newFrame = ref<Partial<PassDraft>>({
   shotCount: 2,
   exposureSec: 0.25,
   aperture: 5.6,
   iso: 200,
   shutterAngle: 180,
   lighting: '主灯 + 柔光箱',
-  propOffsetMm: 0,
   note: '',
 });
 
@@ -47,6 +48,9 @@ const { draft: batch, reset: resetBatch } = useLocalDraft<BatchExposure>('frame-
 const activeShot = computed<Shot | undefined>(() => (activeShotId.value === null ? undefined : shotStore.byId(activeShotId.value)));
 const planned = computed(() => (activeShot.value ? durationToFrames(activeShot.value.durationSec, activeShot.value.fps) : 0));
 const ordered = computed(() => frames.value.slice().sort((a, b) => a.frameNo - b.frameNo));
+const selectedFrame = computed(() => frames.value.find((f) => f.frameNo === selectedFrameNo.value) ?? null);
+/** 明细合计张数：各遍张数调整后随响应式立即重算 */
+const detailTotalShots = computed(() => frames.value.reduce((sum, f) => sum + totalShotCount(f.passes), 0));
 const exposureOptions = EXPOSURE_OPTIONS;
 const apertureOptions = APERTURE_OPTIONS;
 const isoOptions = ISO_OPTIONS;
@@ -74,12 +78,11 @@ function flash(text: string) {
 
 async function doInsert() {
   if (activeShotId.value === null) return;
-  await insertAfter(selectedFrameNo.value);
-  const created = frames.value.find((f) => f.frameNo === (selectedFrameNo.value ?? 0) + 1) ?? frames.value[frames.value.length - 1];
-  if (created) {
-    await patch(created.frameNo, newFrame.value);
-    select(created.frameNo);
-  }
+  const anchor = selectedFrameNo.value;
+  // 草稿是单遍参数（灯光 / 曝光 / 张数等标量），store 会据此生成第一遍
+  await insertAfter(anchor, newFrame.value as Partial<FrameEntry>);
+  const created = frames.value.find((f) => f.frameNo === (anchor ?? 0) + 1) ?? frames.value[frames.value.length - 1];
+  if (created) select(created.frameNo);
   flash('已插入一帧并重排序号');
 }
 
@@ -123,6 +126,38 @@ function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
   if (target < 0 || target >= ordered.value.length) return;
   void move(index, target);
 }
+
+/* ---------------- 拍摄遍次操作（增删 / 改 / 上下换序） ---------------- */
+
+async function onPassUpdate(frameNo: number, uid: string, value: Partial<ExposurePass>) {
+  await frameStore.updatePass(frameNo, uid, value);
+}
+
+async function onPassAdd(frameNo: number) {
+  await frameStore.addPass(frameNo);
+}
+
+async function onPassRemove(frameNo: number, uid: string) {
+  await frameStore.removePass(frameNo, uid);
+}
+
+async function onPassMove(frameNo: number, from: number, to: number) {
+  await frameStore.movePass(frameNo, from, to);
+}
+
+/** 编排台选中帧的遍次事件（模板里统一带上 frameNo） */
+async function updateSelectedPass(uid: string, value: Partial<ExposurePass>) {
+  if (selectedFrame.value) await onPassUpdate(selectedFrame.value.frameNo, uid, value);
+}
+function addSelectedPass() {
+  if (selectedFrame.value) void onPassAdd(selectedFrame.value.frameNo);
+}
+async function removeSelectedPass(uid: string) {
+  if (selectedFrame.value) await onPassRemove(selectedFrame.value.frameNo, uid);
+}
+async function moveSelectedPass(from: number, to: number) {
+  if (selectedFrame.value) await onPassMove(selectedFrame.value.frameNo, from, to);
+}
 </script>
 
 <template>
@@ -153,7 +188,8 @@ function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
       <div class="stat-row">
         <div class="stat"><span class="label">镜号</span><span class="value small mono">{{ activeShot.code }}</span></div>
         <div class="stat"><span class="label">条带帧数</span><span class="value">{{ frames.length }}</span></div>
-        <div class="stat"><span class="label">计划张数</span><span class="value">{{ planned }}</span></div>
+        <div class="stat"><span class="label">合计拍摄张数</span><span class="value" data-testid="board-total-shots">{{ detailTotalShots }}</span></div>
+        <div class="stat"><span class="label">计划帧数</span><span class="value">{{ planned }}</span></div>
         <div class="stat"><span class="label">当前时长</span><span class="value small">{{ totalDuration }} s</span></div>
         <div class="stat"><span class="label">帧率</span><span class="value small">{{ fps }} fps</span></div>
       </div>
@@ -167,7 +203,17 @@ function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
             <button type="button" class="btn small" @click="syncShotRange">重算时长</button>
           </div>
         </div>
-        <FrameStrip :frames="ordered" :selected="selectedFrameNo" @update:selected="select" @reorder="doReorder" @patch="patchFrame" />
+        <FrameStrip
+          :frames="ordered"
+          :selected="selectedFrameNo"
+          @update:selected="select"
+          @reorder="doReorder"
+          @patch="patchFrame"
+          @pass-update="onPassUpdate"
+          @pass-add="onPassAdd"
+          @pass-remove="onPassRemove"
+          @pass-move="onPassMove"
+        />
       </div>
 
       <div class="two-panel">
@@ -207,25 +253,33 @@ function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
         </div>
 
         <div class="panel">
-          <div class="panel-head"><h2>新帧曝光参数</h2><span class="muted">插入时写入</span></div>
+          <div class="panel-head"><h2>新帧首遍参数</h2><span class="muted">插入时写入第一遍，之后可在条带内增删遍次</span></div>
           <ExposureForm v-model="newFrame" :fps="fps" />
         </div>
       </div>
 
       <div class="panel">
-        <div class="panel-head"><h2>帧序明细</h2><span class="muted">可上下移动单帧，序号自动重排</span></div>
+        <div class="panel-head">
+          <h2>帧序明细</h2>
+          <span class="muted">合计张数 {{ detailTotalShots }} 张 · 遍次可上下换序，序号自动重排</span>
+        </div>
         <table class="table" data-testid="board-table">
           <thead>
-            <tr><th>位次</th><th>帧号</th><th>张数</th><th>曝光 s</th><th>光圈</th><th>ISO</th><th>位移 mm</th><th>操作</th></tr>
+            <tr><th>位次</th><th>帧号</th><th>遍次</th><th>合计张数</th><th>各遍灯光 / 曝光 / 张数</th><th>位移 mm</th><th>帧操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="(frame, index) in ordered" :key="frame.id ?? index" :class="{ active: frame.frameNo === selectedFrameNo }" @click="select(frame.frameNo)">
               <td>{{ index + 1 }}</td>
               <td class="mono">{{ frame.frameNo }}</td>
-              <td>{{ frame.shotCount }} 张</td>
-              <td>{{ frame.exposureSec }}</td>
-              <td>f/{{ frame.aperture }}</td>
-              <td>{{ frame.iso }}</td>
+              <td>{{ frame.passes.length }} 遍</td>
+              <td>
+                <strong :data-testid="`board-row-total-${frame.frameNo}`">{{ totalShotCount(frame.passes) }}</strong> 张
+              </td>
+              <td class="pass-summary muted">
+                <span v-for="(p, i) in frame.passes" :key="p.uid" class="pass-chip">
+                  {{ i + 1 }}. {{ p.lighting }} · {{ p.exposureSec }}s · {{ p.shotCount }}张<template v-if="p.note">（{{ p.note }}）</template>
+                </span>
+              </td>
               <td>{{ frame.propOffsetMm }}</td>
               <td class="row-actions">
                 <button type="button" class="btn tiny" :disabled="index === 0" @click.stop="shiftFrame(frame, -1)">上移</button>
@@ -233,8 +287,30 @@ function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
               </td>
             </tr>
           </tbody>
+          <tfoot>
+            <tr class="table-foot">
+              <td colspan="3">合计（{{ ordered.length }} 帧）</td>
+              <td data-testid="board-detail-total">{{ detailTotalShots }} 张</td>
+              <td colspan="3" class="muted">调整任一遍张数后此处与帧条带立即重算</td>
+            </tr>
+          </tfoot>
         </table>
         <p class="muted">按帧率 {{ fps }} fps 计算，当前帧序等效时长 {{ framesToDuration(ordered.length, fps) }} s。</p>
+
+        <div v-if="selectedFrame" class="pass-editor" data-testid="board-pass-editor">
+          <div class="pass-editor-head">
+            <h3>第 {{ selectedFrame.frameNo }} 帧拍摄遍次</h3>
+            <span class="muted">先拍背景、换灯后再拍前景时，可增加一遍分别记录参数</span>
+          </div>
+          <PassList
+            :passes="selectedFrame.passes"
+            :frame-no="selectedFrame.frameNo"
+            @update="updateSelectedPass"
+            @add="addSelectedPass"
+            @remove="removeSelectedPass"
+            @move="moveSelectedPass"
+          />
+        </div>
       </div>
     </template>
   </section>
@@ -369,6 +445,34 @@ h1 {
 }
 .table tbody tr.active {
   background: #f5f8ff;
+}
+.table-foot td {
+  font-weight: 600;
+  border-top: 2px solid #e2e7ef;
+}
+.pass-summary {
+  max-width: 340px;
+}
+.pass-chip {
+  display: block;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.pass-editor {
+  margin-top: 14px;
+  border-top: 1px dashed #e2e7ef;
+  padding-top: 12px;
+}
+.pass-editor-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.pass-editor-head h3 {
+  margin: 0;
+  font-size: 14px;
 }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

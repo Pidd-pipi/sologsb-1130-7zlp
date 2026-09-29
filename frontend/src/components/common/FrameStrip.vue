@@ -1,13 +1,15 @@
 <script setup lang="ts">
 /**
- * 帧序横向条带：按曝光时间 / 道具位移量着色，支持点击选中与拖拽换序。
- * 选中帧后可在条带内就地修改张数、曝光参数与道具位移量。
+ * 帧序横向条带：按首遍曝光时间 / 道具位移量着色，支持点击选中与拖拽换序。
+ * 选中帧后可在条带内就地调整道具位移，并通过遍次编辑器增删拍摄遍次、
+ * 修改每遍灯光 / 曝光时间 / 张数 / 备注、上下换序；合计张数即时重算。
  * 仅渲染色块与文字标注，不涉及任何图像处理与成片输出。
  */
 import { computed, ref } from 'vue';
-import type { FrameEntry, ShotCount } from '../../types/frame';
-import { SHOT_COUNT_OPTIONS } from '../../types/frame';
+import type { ExposurePass, FrameEntry } from '../../types/frame';
+import { totalShotCount } from '../../types/frame';
 import { frameColor, type FrameColorInput } from '../../utils/frameMath';
+import PassList from './PassList.vue';
 
 interface Props {
   frames: FrameEntry[];
@@ -26,16 +28,31 @@ const emit = defineEmits<{
   (e: 'update:selected', frameNo: number | null): void;
   (e: 'reorder', from: number, to: number): void;
   (e: 'patch', frameNo: number, patch: Partial<FrameEntry>): void;
+  (e: 'pass-update', frameNo: number, uid: string, patch: Partial<ExposurePass>): void;
+  (e: 'pass-add', frameNo: number): void;
+  (e: 'pass-remove', frameNo: number, uid: string): void;
+  (e: 'pass-move', frameNo: number, from: number, to: number): void;
 }>();
 
 const dragFrom = ref<number | null>(null);
 
+function firstExposure(frame: FrameEntry): number {
+  return frame.passes[0]?.exposureSec ?? 0.25;
+}
+
 function colorOf(frame: FrameEntry): string {
   const input: FrameColorInput = {
     propOffsetMm: props.colorBy === 'offset' ? frame.propOffsetMm : 0,
-    exposureSec: props.colorBy === 'exposure' ? frame.exposureSec : 0.25,
+    exposureSec: props.colorBy === 'exposure' ? firstExposure(frame) : 0.25,
   };
   return frameColor(input);
+}
+
+function passesTitle(frame: FrameEntry): string {
+  const detail = frame.passes
+    .map((p, i) => `第${i + 1}遍 ${p.lighting} ${p.exposureSec}s ×${p.shotCount}张`)
+    .join('；');
+  return `第 ${frame.frameNo} 帧 · 共 ${frame.passes.length} 遍合计 ${totalShotCount(frame.passes)} 张 · 位移 ${frame.propOffsetMm}mm · ${detail}`;
 }
 
 function onSelect(frameNo: number) {
@@ -61,19 +78,36 @@ function patchSelected(patch: Partial<FrameEntry>) {
   emit('patch', props.selected, patch);
 }
 
+function emitPassUpdate(uid: string, patch: Partial<ExposurePass>) {
+  if (selectedFrame.value) emit('pass-update', selectedFrame.value.frameNo, uid, patch);
+}
+
+function emitPassAdd() {
+  if (selectedFrame.value) emit('pass-add', selectedFrame.value.frameNo);
+}
+
+function emitPassRemove(uid: string) {
+  if (selectedFrame.value) emit('pass-remove', selectedFrame.value.frameNo, uid);
+}
+
+function emitPassMove(from: number, to: number) {
+  if (selectedFrame.value) emit('pass-move', selectedFrame.value.frameNo, from, to);
+}
+
 const selectedFrame = computed(() => props.frames.find((f) => f.frameNo === props.selected) ?? null);
 
 const totalOffset = computed(() =>
   Math.round(props.frames.reduce((sum, f) => sum + (f.propOffsetMm || 0), 0) * 100) / 100,
 );
 
-const shotCountOptions = SHOT_COUNT_OPTIONS;
+const stripTotalShots = computed(() => props.frames.reduce((sum, f) => sum + totalShotCount(f.passes), 0));
 </script>
 
 <template>
   <div class="frame-strip" data-testid="frame-strip">
     <div class="strip-meta">
       <span>帧序条带：{{ frames.length }} 帧</span>
+      <span data-testid="strip-total-shots">合计拍摄 {{ stripTotalShots }} 张</span>
       <span>位移合计 {{ totalOffset }} mm</span>
       <span v-if="!readonly" class="hint">点击选中 · 拖拽换序</span>
     </div>
@@ -87,76 +121,25 @@ const shotCountOptions = SHOT_COUNT_OPTIONS;
         :style="{ background: colorOf(frame) }"
         :draggable="!readonly"
         :data-testid="`strip-cell-${frame.frameNo}`"
-        :title="`第 ${frame.frameNo} 帧 · ${frame.shotCount} 张 · ${frame.exposureSec}s · f/${frame.aperture} · ISO${frame.iso} · 位移 ${frame.propOffsetMm}mm`"
+        :title="passesTitle(frame)"
         @click="onSelect(frame.frameNo)"
         @dragstart="onDragStart(index, $event)"
         @dragover.prevent
         @drop="onDrop(index)"
       >
         <span class="cell-no">{{ frame.frameNo }}</span>
-        <span class="cell-sub">{{ frame.shotCount }}张</span>
+        <span class="cell-sub" :data-testid="`strip-shots-${frame.frameNo}`">{{ totalShotCount(frame.passes) }}张/{{ frame.passes.length }}遍</span>
         <span class="cell-sub">{{ frame.propOffsetMm }}mm</span>
       </div>
       <div v-if="!frames.length" class="strip-empty">当前镜头还没有帧条目，请先插入一帧</div>
     </div>
 
     <div v-if="selectedFrame && !readonly" class="strip-editor" data-testid="strip-editor">
-      <div class="editor-title">第 {{ selectedFrame.frameNo }} 帧参数</div>
+      <div class="editor-title">
+        第 {{ selectedFrame.frameNo }} 帧参数 · 共 {{ selectedFrame.passes.length }} 遍，
+        合计 {{ totalShotCount(selectedFrame.passes) }} 张
+      </div>
       <div class="editor-grid">
-        <label class="field">
-          <span>拍摄张数</span>
-          <select
-            :value="selectedFrame.shotCount"
-            :data-testid="`strip-shotcount-${selectedFrame.frameNo}`"
-            @change="patchSelected({ shotCount: Number(($event.target as HTMLSelectElement).value) as ShotCount })"
-          >
-            <option v-for="opt in shotCountOptions" :key="opt" :value="opt">{{ opt }} 张</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>曝光时间 s</span>
-          <input
-            type="number"
-            min="0.008"
-            max="8"
-            step="0.008"
-            :value="selectedFrame.exposureSec"
-            @change="patchSelected({ exposureSec: Number(($event.target as HTMLInputElement).value) })"
-          />
-        </label>
-        <label class="field">
-          <span>光圈 f</span>
-          <input
-            type="number"
-            min="1.4"
-            max="22"
-            step="0.1"
-            :value="selectedFrame.aperture"
-            @change="patchSelected({ aperture: Number(($event.target as HTMLInputElement).value) })"
-          />
-        </label>
-        <label class="field">
-          <span>ISO</span>
-          <input
-            type="number"
-            min="100"
-            max="3200"
-            step="100"
-            :value="selectedFrame.iso"
-            @change="patchSelected({ iso: Number(($event.target as HTMLInputElement).value) })"
-          />
-        </label>
-        <label class="field">
-          <span>快门角度 °</span>
-          <input
-            type="number"
-            min="45"
-            max="360"
-            step="1"
-            :value="selectedFrame.shutterAngle"
-            @change="patchSelected({ shutterAngle: Number(($event.target as HTMLInputElement).value) })"
-          />
-        </label>
         <label class="field">
           <span>道具位移 mm</span>
           <input
@@ -169,6 +152,17 @@ const shotCountOptions = SHOT_COUNT_OPTIONS;
             @change="patchSelected({ propOffsetMm: Number(($event.target as HTMLInputElement).value) })"
           />
         </label>
+      </div>
+      <div class="editor-passes">
+        <PassList
+          :passes="selectedFrame.passes"
+          :frame-no="selectedFrame.frameNo"
+          compact
+          @update="emitPassUpdate"
+          @add="emitPassAdd"
+          @remove="emitPassRemove"
+          @move="emitPassMove"
+        />
       </div>
     </div>
   </div>
@@ -198,7 +192,7 @@ const shotCountOptions = SHOT_COUNT_OPTIONS;
   padding-bottom: 6px;
 }
 .strip-cell {
-  min-width: 54px;
+  min-width: 60px;
   height: 74px;
   border-radius: 8px;
   color: #fff;
@@ -249,6 +243,10 @@ const shotCountOptions = SHOT_COUNT_OPTIONS;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 8px;
+  margin-bottom: 10px;
+}
+.editor-passes {
+  margin-top: 4px;
 }
 .field {
   display: flex;

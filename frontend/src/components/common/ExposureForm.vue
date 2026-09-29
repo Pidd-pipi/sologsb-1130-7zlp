@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
- * 曝光参数表单：拍摄张数、曝光时间、光圈、ISO、快门角度、灯光配置、道具位移。
- * 被 /shots/new 与 /frames 消费；v-model 绑定 FrameEntry 的核心字段。
+ * 曝光参数表单：拍摄张数、曝光时间、光圈、ISO、快门角度、灯光配置、备注。
+ * 被 /shots/new 与 /frames 消费；v-model 绑定单遍拍摄参数（PassDraft）。
  */
 import { computed, reactive, watch } from 'vue';
-import type { FrameEntry } from '../../types/frame';
+import type { PassDraft } from '../../types/frame';
 import { SHOT_COUNT_OPTIONS } from '../../types/frame';
 import {
   APERTURE_OPTIONS,
@@ -17,7 +17,7 @@ import {
 } from '../../utils/exposure';
 
 interface Props {
-  modelValue: Partial<FrameEntry>;
+  modelValue: Partial<PassDraft>;
   fps?: number;
   lightingOptions?: string[];
   disabled?: boolean;
@@ -30,17 +30,16 @@ const props = withDefaults(defineProps<Props>(), {
 });
 
 const emit = defineEmits<{
-  (e: 'update:modelValue', value: Partial<FrameEntry>): void;
+  (e: 'update:modelValue', value: Partial<PassDraft>): void;
 }>();
 
-const local = reactive<Partial<FrameEntry>>({
+const local = reactive<Partial<PassDraft>>({
   shotCount: 2,
   exposureSec: 0.25,
   aperture: 5.6,
   iso: 200,
   shutterAngle: 180,
   lighting: '主灯 + 柔光箱',
-  propOffsetMm: 0,
   note: '',
 });
 
@@ -67,7 +66,14 @@ watch(
   { deep: true },
 );
 
-const warnings = computed(() => checkExposure(local as FrameEntry, props.fps));
+const warnings = computed(() =>
+  checkExposure({
+    exposureSec: local.exposureSec ?? 0.25,
+    aperture: local.aperture ?? 5.6,
+    iso: local.iso ?? 200,
+    shutterAngle: local.shutterAngle ?? 180,
+  }, props.fps),
+);
 const ev = computed(() => exposureValue(local.exposureSec ?? 0, local.aperture ?? 0, local.iso ?? 0));
 const suggestion = computed(() => suggestExposure(props.fps));
 
@@ -120,18 +126,6 @@ const shutterOptions = SHUTTER_ANGLE_OPTIONS;
         <select v-model="local.lighting" :disabled="disabled" data-testid="exposure-lighting">
           <option v-for="opt in lightingOptions" :key="opt" :value="opt">{{ opt }}</option>
         </select>
-      </label>
-      <label class="field">
-        <span>道具位移量（mm）</span>
-        <input
-          v-model.number="local.propOffsetMm"
-          type="number"
-          min="-200"
-          max="200"
-          step="0.5"
-          :disabled="disabled"
-          data-testid="exposure-offset"
-        />
       </label>
       <label class="field wide">
         <span>备注</span>
